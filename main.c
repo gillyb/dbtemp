@@ -2,12 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-// NOTE: sizeof(int) is 4 bytes (but we shouldn't depend on this)
-
 // TODO: There's a bug with the zero value! (delete it, or make it work!)
 
-const char* dir = "./results/";
-int c = 0;
+const char* DATA_DIR = "./data/";
+const char* RESULTS_DIR = "./results/";
+const char* JOIN_FILE = "./results/join";
+
+const int FIELD_SIZE = 5;
 
 // Structure that defines a row in the input table
 typedef struct TableRow {
@@ -17,15 +18,18 @@ typedef struct TableRow {
 
 /**
  * This converts a string to a TableRow object
+ * When reading the table file, we pass each line to this method,
+ * and get a TableRow object in return (as a passed pointer parameter)
  */
 void deserializeRow(char* rowString, TableRow* rowObject) {
-    const int fieldSize = 5;        // Each field in our table is 5 bytes
 
-    char* field = malloc(fieldSize * sizeof(char));
-    char* value = malloc(fieldSize * sizeof(char));
+    char* field = malloc(FIELD_SIZE * sizeof(char));
+    char* value = malloc(FIELD_SIZE * sizeof(char));
 
-    strncpy(field, rowString, fieldSize);
-    strncpy(value, rowString + 1 + fieldSize, fieldSize);
+    // Structure of a table row in the file system is:
+    // <field1><single space><field2>\n
+    strncpy(field, rowString, FIELD_SIZE);
+    strncpy(value, rowString + 1 + FIELD_SIZE, FIELD_SIZE);
 
     rowObject->fieldId = atoi(field);
     rowObject->fieldValue = atoi(value);
@@ -34,32 +38,41 @@ void deserializeRow(char* rowString, TableRow* rowObject) {
     free(value);
 }
 
+/**
+ * Takes an array of TableRow objects and writes them
+ * to a specific filename.
+ */
 void writePageToFile(char* filename, TableRow* memoryPage, int pageSize) {
     FILE* pageFile = fopen(filename, "a");
-    // int memoryPageSize = sizeof(memoryPage) / sizeof(TableRow);
     for (int i=0; i < 3; i++) {
-        if (memoryPage[i].fieldId == 0 && memoryPage[i].fieldValue == 0) {
+        if (memoryPage[i].fieldId == 0 && memoryPage[i].fieldValue == 0)
             continue;
-        }
         fprintf(pageFile, "%d %d\n", memoryPage[i].fieldId, memoryPage[i].fieldValue);
     }
-    c++;
     fclose(pageFile);
 }
 
+/**
+ * Count how many digits a specific number (int) has
+ * This is useful for allocating memory for strings we'll
+ * need for creating filenames.
+ */
 int numDigits(int num) {
     int digitCount = 0;
-    while (num / 10 > 0) {
+    while (num / 10 > 0)
         digitCount++;
-    }
     return digitCount;
 }
 
+/**
+ * Saves a bucket to the disk, and clears the bucket array
+ * so we have room to read more.
+ */
 void saveAndClearBucket(const char* tableName, int hashValue, TableRow** buckets, int numRowsInPage) {
 
-    char* bucketFileName = malloc(sizeof(tableName) + (sizeof(char) * numDigits(hashValue)) + sizeof(dir) + 1);
+    char* bucketFileName = malloc(sizeof(tableName) + (sizeof(char) * numDigits(hashValue)) + sizeof(RESULTS_DIR) + 1);
 
-    strcpy(bucketFileName, dir);
+    strcpy(bucketFileName, RESULTS_DIR);
     strcat(bucketFileName, tableName);
     char hashValueStr[numDigits(hashValue)];
     sprintf(hashValueStr, "_%d", hashValue);
@@ -72,8 +85,16 @@ void saveAndClearBucket(const char* tableName, int hashValue, TableRow** buckets
         buckets[hashValue][i].fieldId = 0;
         buckets[hashValue][i].fieldValue = 0;
     }
+    free(bucketFileName);
 }
 
+/**
+ * Goes over a specific table, and splits the table into
+ * hash buckets.
+ * A single file for each hash bucket.
+ * This method needs to receive the name of the table,
+ * the amount of buckets and the number of rows in each memory page.
+ */
 void splitTableToBuckets(const char* tableName, int hashMod, int numRowsInPage) {
 
     TableRow **hashBuckets = (TableRow **)malloc(hashMod * sizeof(TableRow *));
@@ -84,26 +105,22 @@ void splitTableToBuckets(const char* tableName, int hashMod, int numRowsInPage) 
     for (int i=0; i<hashMod; i++) 
         hashBucketsCount[i] = 0;
 
-    // start reading table from data directory
-    char* tableDir = "./data/";
-    char* tableFilename = malloc(sizeof(tableName) + sizeof(tableDir));
-    strcpy(tableFilename, tableDir);
+    // construct the table filename
+    char* tableFilename = malloc(sizeof(tableName) + sizeof(DATA_DIR));
+    strcpy(tableFilename, DATA_DIR);
     strcat(tableFilename, tableName);
 
-    FILE *fp = fopen(tableFilename, "r");    // open in read only mode
-
-    int fieldSize = 5;
-    int lineSize = sizeof(char) * (fieldSize + fieldSize + 3);
-
+    int lineSize = sizeof(char) * (FIELD_SIZE + FIELD_SIZE + 3);
     char fileLine[lineSize];        // We can assume that each line in the file is smaller than a memory page
-    while (fgets(fileLine, sizeof(fileLine), fp)) {
 
-        int fieldSize = 5;
+    // Start reading the table data file
+    FILE *fp = fopen(tableFilename, "r");
+    while (fgets(fileLine, sizeof(fileLine), fp)) {
 
         TableRow tableRow;
         deserializeRow(fileLine, &tableRow);
 
-        // place in bucket
+        // place the row in the designated bucket
         int hashValue = tableRow.fieldId % hashMod;
         int bucketCounter = hashBucketsCount[hashValue];
         hashBuckets[hashValue][bucketCounter] = tableRow;
@@ -120,14 +137,26 @@ void splitTableToBuckets(const char* tableName, int hashMod, int numRowsInPage) 
         saveAndClearBucket(tableName, i, hashBuckets, numRowsInPage);
     }
 
+    // free memory
     fclose(fp);
+    for (int i=0; i<hashMod; i++)
+        free(hashBuckets[i]);
+    free(hashBuckets);
+    free(tableFilename);
 }
 
+/**
+ * Read a whole bucket file into memory.
+ * This finds the specific bucket file according to a given
+ * table name and bucket number, and returns an array of 
+ * TableRow objects with all the rows in this bucket.
+ * The array returned must be 'freed' not to cause a memory leak.
+ */
 TableRow* readBucketFileToMemory(const char* tableName, int bucketNum, int numRowsInPage, int* bucketCount) {
 
     // construct the name of the bucket file
-    char* bucketFilename = malloc(sizeof(tableName) + sizeof(dir) + 2);
-    strcpy(bucketFilename, dir);
+    char* bucketFilename = malloc(sizeof(tableName) + sizeof(RESULTS_DIR) + 2);
+    strcpy(bucketFilename, RESULTS_DIR);
     strcat(bucketFilename, tableName);
     char* t = malloc(sizeof(char) * numDigits(bucketNum));
     sprintf(t, "_%d", bucketNum);
@@ -138,12 +167,10 @@ TableRow* readBucketFileToMemory(const char* tableName, int bucketNum, int numRo
     FILE* bucketFile = fopen(bucketFilename, "r");      // TODO: We assume all bucket files exist. We should probably make sure the file exists!
     TableRow* bucketRows = malloc(sizeof(TableRow) * numRowsInPage);
 
-    int fieldSize = 5;
-    int lineSize = sizeof(char) * (fieldSize + fieldSize + 3);
+    int lineSize = sizeof(char) * (FIELD_SIZE + FIELD_SIZE + 3);
     char fileLine[lineSize];        // We can assume that each line in the file is smaller than a memory page
 
     int count = 0;
-    // printf("about to read %s", bucketFileName);
     while (fgets(fileLine, sizeof(fileLine), bucketFile)) {
         
         TableRow tableRow;
@@ -151,59 +178,49 @@ TableRow* readBucketFileToMemory(const char* tableName, int bucketNum, int numRo
 
         bucketRows[count] = tableRow;
         
-        count++;
-        if (count % numRowsInPage == 0) {
-            printf("reallocating\n");   // TEST
+        if (++count % numRowsInPage == 0) {
             bucketRows = realloc(bucketRows, sizeof(bucketRows) + (sizeof(TableRow) * numRowsInPage));
         }
     }
-    printf("count: %d, size: %d", count, sizeof(TableRow));
     fclose(bucketFile);
+    free(bucketFilename);
 
     *bucketCount = count;
     return bucketRows;
 }
 
-// We assume we're joining between two tables only
+/**
+ * Join the two tables
+ * by reading the hash table bucket files, and joining
+ * them to a final file with the 'joined result'
+ */
 void joinTables(int numBuckets, int numRowsInPage, const char* firstTable, const char* secondTable) {
 
-    int bucketNum = 0;
-    char* joinFilename = "./results/join";
-    FILE* joinFile = fopen(joinFilename, "w");
-
     // read each bucket file into memory
+    FILE* joinFile = fopen(JOIN_FILE, "w");
+
     for (int n=0; n<numBuckets; n++) {
 
         int bucketCountOne, bucketCountTwo;
         TableRow* bucketFileOne = readBucketFileToMemory(firstTable, n, numRowsInPage, &bucketCountOne);
         TableRow* bucketFileTwo = readBucketFileToMemory(secondTable, n, numRowsInPage, &bucketCountTwo);
 
-        // Iterate over the first bucket file, and join them
+        // Iterate over the first bucket file, and join the values with the second
         for (int i=0; i<bucketCountOne; i++) {
             for (int j=0; j<bucketCountTwo; j++) {
-                if (bucketFileTwo[j].fieldId == bucketFileOne[i].fieldId)
+                if (bucketFileTwo[j].fieldId == bucketFileOne[i].fieldId) {
                     fprintf(joinFile, "%d %d %d\n", bucketFileOne[i].fieldId, bucketFileOne[i].fieldValue, bucketFileTwo[j].fieldValue);
+                }
             }
         }
         // TODO: we might have rows here that we didn't put in the file!!
-
-        // TEST: print out bucketRows
-        printf("\n\n We finished reading the whole bucket file. printing : ");
-        for (int i=0; i<bucketCountOne; i++) {
-            printf("id: %d, value: %d\n", bucketFileOne[i].fieldId, bucketFileOne[i].fieldValue);
-        }
-
-        free(bucketFileOne);
-        free(bucketFileTwo);
     }
-
-    // iterate over one of them and for each row
-    //      find the matching row in the other bucket
-    //      write them to a new 'joined' file
-
     fclose(joinFile);
 }
 
+/**
+ * Collects the user input so we can start joining :)
+ */
 void getUserInput(int* pageSizeBytes, int* numPagesInBuffer, int* hashMod) {
     // TODO: Check the limits of these (according to page 137)
     printf("We are going to produce a hash-join.\nFirst we need some information..\n\n");
@@ -223,15 +240,10 @@ int main(int argc, char *argv[]) {
 
     // input parameters
     int pageSizeBytes, numPagesInBuffer, hashMod;
-
-    // getUserInput(&pageSizeBytes, &numPagesInBuffer, &hashMod);
-    pageSizeBytes = 24;
-    numPagesInBuffer = 12;
-    hashMod = 4;
+    getUserInput(&pageSizeBytes, &numPagesInBuffer, &hashMod);
 
     // Calculate how many rows fit in one page
     int numRowsInPage = pageSizeBytes / sizeof(TableRow);
-    printf("We can fit %d table rows in each memory page.\n", numRowsInPage);
 
     // TODO: these should come from the user
     const char* table1 = "table1";
